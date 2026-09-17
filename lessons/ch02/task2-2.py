@@ -6,16 +6,16 @@ from langchain_openai import ChatOpenAI
 from deepagents import create_deep_agent
 from tavily import TavilyClient
 
-
 # 1. 读取项目根目录的 .env
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 # 2. 接入你已经配置的模型
-model=ChatOpenAI(
+model = ChatOpenAI(
     model=os.environ["AGENTSEEK_MODEL"],
     api_key=os.environ["OPENAI_API_KEY"],
     base_url=os.environ["OPENAI_API_BASE"] or None,
 )
+
 
 def calculate(expression: str) -> float:
     """Evaluate a math expression and return the result.
@@ -26,7 +26,10 @@ def calculate(expression: str) -> float:
     # 仅做演示，实际项目应使用安全的解析库而非 eval
     return eval(expression)
 
-def convert_currency(amount: float, from_currency: str, to_currency: str = "CNY") -> dict:
+
+def convert_currency(
+    amount: float, from_currency: str, to_currency: str = "CNY"
+) -> dict:
     """Convert an amount from one currency to another.
 
     Args:
@@ -39,6 +42,7 @@ def convert_currency(amount: float, from_currency: str, to_currency: str = "CNY"
     cny = amount * rates[from_currency]
     return {"amount": round(cny / rates[to_currency], 2), "currency": to_currency}
 
+
 agent = create_deep_agent(
     model=model,
     tools=[calculate, convert_currency],
@@ -46,7 +50,14 @@ agent = create_deep_agent(
 )
 
 result = agent.invoke(
-    {"messages": [{"role": "user", "content": "帮我把 100 美元换算成人民币，再用它乘以 1.08 的通胀系数。"}]}
+    {
+        "messages": [
+            {
+                "role": "user",
+                "content": "帮我把 100 美元换算成人民币，再用它乘以 1.08 的通胀系数。",
+            }
+        ]
+    }
 )
 print(result["messages"][-1].content)
 

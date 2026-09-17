@@ -6,20 +6,21 @@ from langchain_openai import ChatOpenAI
 from deepagents import create_deep_agent
 from tavily import TavilyClient
 
-
 # 1. 读取项目根目录的 .env
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 # 2. 接入你已经配置的模型
-model=ChatOpenAI(
+model = ChatOpenAI(
     model=os.environ["AGENTSEEK_MODEL"],
     api_key=os.environ["OPENAI_API_KEY"],
     base_url=os.environ["OPENAI_API_BASE"] or None,
 )
 
+
 def get_weather(city: str) -> str:
     """Get weather for a given city."""
     return f"It's always sunny in {city}!"
+
 
 agent = create_deep_agent(
     model=model,
