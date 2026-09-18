@@ -1,6 +1,6 @@
 # 06｜权限、自定义后端、并发与生产架构
 
-本节将实验语义连接到系统设计。标注 `runnable` 的代码依赖第 03 部分公共实验代码；事务示例为独立运行的通用设计实验。未提供数据库凭证，也未连接生产数据库。
+本节为选学内容，建议先完成主线 01–06。实验均有独立 `.py` 文件，不依赖公共代码或其他脚本的变量。未提供数据库凭证，也未连接生产数据库。
 
 ## 1. 先定义信任边界
 
@@ -25,54 +25,27 @@
 
 例如“只允许公开目录”可用更具体的允许规则在前，兜底拒绝规则在后。读写应分别思考；只读资料区需要拒绝写，但未必拒绝读。
 
-## 3. 实验 J：创建、修改、删除都受到保护
+## 3. 实验 09：规则文件不能改，草稿可以改
 
-```python
-# runnable: permissions
-with TemporaryDirectory(prefix="ch03-permission-") as directory:
-    backend = FilesystemBackend(root_dir=directory, virtual_mode=True)
-    # 由应用初始化政策，随后测试 Agent 文件工具的访问限制。
-    assert backend.write("/policies/rules.md", "rule=original").error is None
-    agent = make_agent(backend, permissions=[
-        FilesystemPermission(operations=["write"], paths=["/policies/**"], mode="deny"),
-    ])
-    _, output = run_steps(agent, [
-        call("read_file", file_path="/policies/rules.md"),
-        call("write_file", file_path="/policies/new.md", content="new"),
-        call("edit_file", file_path="/policies/rules.md", old_string="original", new_string="changed"),
-        call("delete", file_path="/policies/rules.md"),
-        call("write_file", file_path="/scratch/ok.md", content="allowed"),
-        call("read_file", file_path="/../escape.txt"),
-    ], verbose=False)
-    assert_statuses(output, ["success", "error", "error", "error", "success", "error"])
-    assert backend.read("/policies/rules.md").file_data["content"] == "rule=original"
-    assert backend.read("/policies/new.md").error is not None
-    print("PASS: 受保护路径的创建/编辑/删除被拒绝；普通路径正常")
+完整脚本：[09_permissions.py](../code/09_permissions.py)。
+
+```bash
+.venv/bin/python lessons/ch03/code/09_permissions.py
 ```
 
-### 3.1 允许例外时，顺序不能写反
+本实验只做两次写入：写 `/rules.txt` 被拒绝，写 `/draft.txt` 成功。随后直接读取真实文件，确认规则没有被改动，草稿确实产生。模型请求固定，避免模型自行避开禁止操作导致无法观察权限效果。
 
-```python
-# runnable: permission_order
-agent = make_agent(StateBackend(), permissions=[
-    FilesystemPermission(operations=["write"], paths=["/public/**"], mode="allow"),
-    FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"),
-])
-_, output = run_steps(agent, [
-    call("write_file", file_path="/public/a.md", content="allowed"),
-    call("write_file", file_path="/private/a.md", content="denied"),
-], verbose=False)
-assert_statuses(output, ["success", "error"])
-print("PASS: 具体例外在前，兜底拒绝在后")
-```
+代码中 `operations=["write"]` 限制写操作，`paths=["/rules.txt"]` 选择文件，`mode="deny"` 表示拒绝。默认没有匹配的请求允许通过。你可以将路径规则改成 `/draft.txt`，预测两次写入的结果；修改实验条件时也要调整原来的断言。
 
-这个实验只限制写操作，读取仍按其规则判断。生产策略中还应测试父目录递归删除、全局搜索的结果过滤、路径别名、隐藏文件和路由边界。
+### 3.1 先理解单条规则，再研究规则顺序
 
-### 3.2 `interrupt` 是暂停，不是拒绝
+first-match-wins 表示第一条命中规则生效。设计只允许 `/output/**` 写入的策略时，具体 allow 在前，`/**` 的兜底 deny 在后。只声明允许一处，并不会自动拒绝所有其他路径。
 
-`interrupt` 需要 Checkpointer 保存挂起的执行。应用检查中断中的 action requests 与 review config，把准确的路径和操作交给有权限的人审核，再按该版本恢复协议用 `Command(resume=...)` 继续同一线程。
+生产扩展测试还应覆盖 edit、delete、父目录删除和搜索过滤；新版这个入门脚本只验证两次 write，不能把未测分支当作已通过。
 
-不要把“用户之前说可以写文件”转换成所有将来敏感操作的审批；也不要在网络重试时用新线程恢复原中断。生产审批记录应绑定请求、工具调用、参数摘要和身份，防止恢复错误操作。本章实测了 deny 路径，没有运行人工审批服务。
+### 3.2 interrupt 是暂停，不是拒绝
+
+`interrupt` 需要 Checkpointer 保存挂起的执行，由应用检查中断请求、完成审核，再使用同一线程按恢复协议继续。本章只运行 deny 分支，没有连接人工审批服务。
 
 ## 4. 工具权限与执行权限不能相互替代
 
@@ -90,96 +63,18 @@ LocalShell 的工作目录不是安全边界。真实沙箱也必须配置出网
 
 引用可信度也要记录。用户上传、第三方网页、内部审核文档可以采用不同可信级别，避免把模型生成的笔记再次当作独立事实来源。
 
-## 6. 实验 K：完整转发文件协议的审计包装器
+## 6. 进阶实验 10：完整转发文件协议的审计包装器
 
 这个扩展展示如何在不修改存储实现的情况下加观测。它覆盖七种核心方法和应用侧上传下载，并保留 `grep` 的 `max_count` 参数。它不是权限系统，也不是合规级审计系统。
 
-```python
-# runnable: audit_backend
-import hashlib
-import time
-import asyncio
-from deepagents.backends.protocol import BackendProtocol
+完整独立脚本：[10_audit_backend.py](../code/advanced/10_audit_backend.py)。
 
-
-class AuditedBackend(BackendProtocol):
-    def __init__(self, inner):
-        self.inner = inner
-        self.events = []
-
-    def _run(self, operation, path, fn):
-        started = time.perf_counter()
-        event = {
-            "operation": operation,
-            "path_hash": hashlib.sha256(str(path).encode()).hexdigest(),
-        }
-        try:
-            result = fn()
-            results = result if isinstance(result, list) else [result]
-            event["ok"] = all(getattr(item, "error", None) is None for item in results)
-            return result
-        except Exception as exc:
-            event["ok"] = False
-            event["exception_type"] = type(exc).__name__
-            raise
-        finally:
-            event["elapsed_ms"] = (time.perf_counter() - started) * 1000
-            self.events.append(event)
-
-    def ls(self, path):
-        return self._run("ls", path, lambda: self.inner.ls(path))
-
-    def read(self, file_path, offset=0, limit=2000):
-        return self._run("read", file_path, lambda: self.inner.read(file_path, offset=offset, limit=limit))
-
-    def write(self, file_path, content):
-        return self._run("write", file_path, lambda: self.inner.write(file_path, content))
-
-    def edit(self, file_path, old_string, new_string, replace_all=False):
-        return self._run("edit", file_path, lambda: self.inner.edit(file_path, old_string, new_string, replace_all))
-
-    def delete(self, file_path):
-        return self._run("delete", file_path, lambda: self.inner.delete(file_path))
-
-    def glob(self, pattern, path=None):
-        return self._run("glob", path, lambda: self.inner.glob(pattern, path))
-
-    def grep(self, pattern, path=None, glob=None, *, max_count=None):
-        return self._run("grep", path, lambda: self.inner.grep(pattern, path, glob, max_count=max_count))
-
-    def upload_files(self, files):
-        return self._run("upload_files", [p for p, _ in files], lambda: self.inner.upload_files(files))
-
-    def download_files(self, paths):
-        return self._run("download_files", paths, lambda: self.inner.download_files(paths))
-
-
-async def check_async_adapter(backend):
-    assert (await backend.awrite("/async.txt", "async-ok")).error is None
-    result = await backend.aread("/async.txt")
-    assert result.error is None and result.file_data["content"] == "async-ok"
-
-
-with TemporaryDirectory(prefix="ch03-audit-") as directory:
-    audited = AuditedBackend(FilesystemBackend(root_dir=directory, virtual_mode=True))
-    agent = make_agent(audited)
-    _, output = run_steps(agent, [
-        call("write_file", file_path="/a.txt", content="hello"),
-        call("read_file", file_path="/a.txt"),
-        call("delete", file_path="/a.txt"),
-        call("read_file", file_path="/a.txt"),
-    ], verbose=False)
-    assert_statuses(output, ["success", "success", "success", "error"])
-    assert any(e["operation"] == "read" and not e["ok"] for e in audited.events)
-    # 普通 Python 脚本使用 asyncio.run；Notebook 已有事件循环时使用 await。
-    # 此处用独立线程驱动，兼容本章脚本式验证与 Notebook。
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        executor.submit(lambda: asyncio.run(check_async_adapter(audited))).result()
-    assert any(e["operation"] == "write" and e["ok"] for e in audited.events)
-    print("审计事件数：", len(audited.events))
-print("PASS: 同步文件调用与异步适配均经过包装器")
+```bash
+.venv/bin/python lessons/ch03/code/advanced/10_audit_backend.py
 ```
+
+脚本先写入、读取、删除，再读取已删除的文件，最后执行异步读写。你会看到六条审计记录，其中删除后的读取失败是预期结果。这里直接测包装器，不引入模型或公共实验框架。
+
 
 ### 6.1 为什么不能只写 `__getattr__` 转发
 
@@ -232,34 +127,18 @@ CREATE TABLE agent_files (
 
 一种方案是乐观并发控制：客户端读取内容和版本，只在版本仍为 7 时提交；冲突者重新读取、合并并重试。
 
-## 9. 实验 L：用版本条件证明能检测丢失更新
+## 9. 进阶实验 11：用版本条件证明能检测丢失更新
 
 这是一段独立的 SQLite 并发控制原理实验，不是框架自带的能力，也没有把 SQLite 接成 Backend。用顺序模拟两个客户端读到相同版本，足以复现“过期写入必须失败”的关键条件。
 
-```python
-# runnable: optimistic_concurrency
-import sqlite3
+完整独立脚本：[11_optimistic_concurrency.py](../code/advanced/11_optimistic_concurrency.py)。
 
-with sqlite3.connect(":memory:") as db:
-    db.execute("CREATE TABLE files (path TEXT PRIMARY KEY, content TEXT, version INTEGER)")
-    db.execute("INSERT INTO files VALUES (?, ?, ?)", ("/report.md", "base", 7))
-    seen_by_a = db.execute("SELECT version FROM files WHERE path=?", ("/report.md",)).fetchone()[0]
-    seen_by_b = db.execute("SELECT version FROM files WHERE path=?", ("/report.md",)).fetchone()[0]
-
-    a = db.execute(
-        "UPDATE files SET content=?, version=version+1 WHERE path=? AND version=?",
-        ("base + A", "/report.md", seen_by_a),
-    )
-    b = db.execute(
-        "UPDATE files SET content=?, version=version+1 WHERE path=? AND version=?",
-        ("base + B", "/report.md", seen_by_b),
-    )
-    assert a.rowcount == 1
-    assert b.rowcount == 0, "过期版本不能覆盖成功更新"
-    current = db.execute("SELECT content, version FROM files WHERE path=?", ("/report.md",)).fetchone()
-    assert current == ("base + A", 8)
-print("PASS: 过期写入被检测，A 的内容未被 B 覆盖")
+```bash
+.venv/bin/python lessons/ch03/code/advanced/11_optimistic_concurrency.py
 ```
+
+观察：A 以版本 7 提交后，文件变成版本 8；B 再拿版本 7 提交，更新行数是 0，旧内容不会覆盖 A 的结果。
+
 
 框架标准 `edit` 接口没有本实验中的显式 `expected_version` 参数。落地时可以增加应用层带版本的工具，或在后端事务内实现原子 read-modify-write。不能在文档中写一句“用 CAS”就假设现有接口自动支持。
 

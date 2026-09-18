@@ -1,6 +1,6 @@
 # 05｜自动卸载、摘要与上下文预算实验
 
-本节依赖第 03 部分公共代码。目标是证明：完整内容可以保存在 Backend，模型历史只保留引用或摘要；然后讨论这样做仍然有哪些限制。
+本节为选学内容，所有实验使用独立 `.py` 文件。先运行实验 08 看自动卸载，再按需要学习摘要与容量设计。无需复制任何公共实验代码。
 
 ## 1. 不同机制处理不同问题
 
@@ -41,76 +41,29 @@ sequenceDiagram
 
 文件工具本身在通用卸载排除列表中，包括 `read_file`、`grep` 等；它们有各自的分页或输出限制。否则读取一份卸载文件，又把读取结果卸载成新文件，会产生循环引用。
 
-## 3. 实验 H：大结果被保存、缩短并能够回读
+## 3. 实验 08：大正文变成路径与预览
 
-我们将阈值降低为 1,000，用约 40 KB 的合成资料触发，不需要构造真实的几十万 token 响应。数据中间埋入一条可核对证据，用来说明仅看头尾预览无法覆盖全部信息。
+独立脚本：[08_large_result.py](../code/08_large_result.py)。
 
-```python
-# runnable: offload
-from langchain_core.tools import tool
-from deepagents.middleware.filesystem import FilesystemMiddleware
-
-payload_lines = [f"entry-{i:04d}: " + "abcdefghij" * 4 for i in range(700)]
-payload_lines[350] = "EVIDENCE-MIDDLE: cache_ttl_seconds=37"
-payload = "\n".join(payload_lines)
-
-
-@tool
-def large_evidence() -> str:
-    """返回实验用的大型证据文本。"""
-    return payload
-
-
-backend = StateBackend()
-agent = make_agent(
-    backend,
-    tools=[large_evidence],
-    middleware=[FilesystemMiddleware(
-        backend=backend,
-        tool_token_limit_before_evict=1000,
-    )],
-)
-result, output = run_steps(agent, [call("large_evidence")], verbose=False)
-assert_statuses(output, ["success"])
-saved = {
-    path: data for path, data in result["files"].items()
-    if path.startswith("/large_tool_results/")
-}
-assert len(saved) == 1
-saved_path, saved_data = next(iter(saved.items()))
-assert saved_data["content"] == payload
-assert saved_path in output[0].content
-assert len(output[0].content) < len(payload)
-assert "EVIDENCE-MIDDLE" not in output[0].content
-print("原文本字符数：", len(payload))
-print("替代消息字符数：", len(output[0].content))
-print("保存路径：", saved_path)
-
-_, recovered = run_steps(agent, [
-    call("grep", pattern="EVIDENCE-MIDDLE", path="/large_tool_results/", output_mode="content"),
-    call("read_file", file_path=saved_path, offset=348, limit=5),
-], verbose=False)
-assert_statuses(recovered, ["success", "success"])
-assert "cache_ttl_seconds=37" in recovered[0].content
-assert "cache_ttl_seconds=37" in recovered[1].content
-print("PASS: 卸载内容完整；中间证据可以搜索并分页回读")
+```bash
+.venv/bin/python lessons/ch03/code/08_large_result.py
 ```
 
-### 3.1 为什么传同一个 Backend 给两个地方
+本实验只调用一次返回大文本的工具。观察五行输出：原文本长度、工具消息长度、工具消息预览、保存路径，以及“保存内容等于原文”的比较结果。
 
-`create_deep_agent` 自带 FilesystemMiddleware。`0.7.14` 按中间件名称替换同名默认实例，因此这里提供定制的 FilesystemMiddleware 来调整阈值。将它与 `backend=` 指向同一个对象，可避免工具读写和卸载被误配置到不同存储。
+本次实测为 47,389 个字符的正文，替代 ToolMessage 为 1,629 个字符。完整正文保存在 StateBackend 中；缩短的是工具消息。数字与当前预览规则有关，不是通用压缩比，也不是 token 或费用。
 
-这一替换行为是版本相关的，本项目源码在 `_apply_custom_middleware` 中实现。不要把本配置不加核对地用于旧版。
+### 3.1 先看现象，再看固定模型
 
-### 3.2 这个实验究竟验证了什么
+`FixedToolModel` 复用框架已有的测试模型，只补充工具绑定方法。它按 responses 播放“调用 get_material”和“结束”两条消息，不访问供应商。工具执行和中间件卸载是真实的。这段辅助代码仅在选学实验出现，前六个实验不需要学习它。
 
-验证了真实业务工具结果被中间件截获，保存内容与原文一致，替代 ToolMessage 引用正确，后续文件工具能读回证据。
+### 3.2 为什么配置 FilesystemMiddleware
 
-没有验证真实 LLM 是否会主动回读、真实 token 节省量、供应商费用和回答准确率。这里打印的是字符数，不能标成 token 数或直接换算为节省金额。
+`create_deep_agent` 内置该中间件。当前版本会用同名实例替换默认实例，本例借此降低阈值。中间件和 Agent 使用同一个 Backend，确保保存位置一致。
 
-### 3.3 路径丢失会怎样
+### 3.3 保存了全文，是否等于模型已经读懂全文
 
-一旦卸载文件被清理、切换到另一个线程、或 Backend 故障，摘要/消息中的引用可能无法解析。因此必须设计引用生命周期：还可能被使用的证据，不应被后台清理任务提前删除。
+不是。它还需要通过引用路径调用 read_file/grep 才能查看未进入预览的部分。若文件已清理、线程切换或存储故障，引用可能失效。实验验证保存完整性，不宣称验证了真实模型的主动检索能力。
 
 ## 4. 自动摘要：压缩的是信息表示，不是事实风险
 
@@ -120,59 +73,18 @@ print("PASS: 卸载内容完整；中间证据可以搜索并分页回读")
 
 摘要、工具参数裁剪和结果卸载的具体执行顺序由中间件控制。原课程中简化的“两道防线”适合入门理解，不应当作所有版本的严格状态机规范。
 
-## 5. 实验 I：验证摘要的归档与继续执行机制
+## 5. 进阶实验 12：验证摘要的归档与继续执行机制
 
 本实验刻意使用固定摘要模型，测试中间件能否执行和归档，不测试摘要语言质量。主模型与摘要模型都不访问外部服务。
 
-```python
-# runnable: summarization
-from deepagents.middleware.summarization import SummarizationMiddleware
+独立脚本：[12_summarization.py](../code/advanced/12_summarization.py)。
 
-
-class FixedReplyModel(BaseChatModel):
-    reply: str = "已收到本轮消息。"
-
-    @property
-    def _llm_type(self):
-        return "ch03-fixed-reply"
-
-    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.reply))])
-
-
-backend = StateBackend()
-summary_model = FixedReplyModel(reply="实验摘要：继续收集证据；历史原文见归档文件。")
-agent = create_deep_agent(
-    model=FixedReplyModel(),
-    backend=backend,
-    checkpointer=InMemorySaver(),
-    middleware=[SummarizationMiddleware(
-        model=summary_model,
-        backend=backend,
-        trigger=("messages", 6),
-        keep=("messages", 2),
-    )],
-)
-config = {"configurable": {"thread_id": "summary-lab"}}
-for i in range(8):
-    result = agent.invoke(
-        {"messages": [HumanMessage(content=f"ORIGINAL-{i}: 本轮证据及约束。")]},
-        config=config,
-    )
-archives = {
-    path: data for path, data in result.get("files", {}).items()
-    if path.startswith("/conversation_history/") and path.endswith(".md")
-}
-assert archives, "没有生成归档，应检查摘要触发条件"
-archive_text = "\n".join(data["content"] for data in archives.values())
-assert "ORIGINAL-0" in archive_text
-assert result["messages"][-1].content == "已收到本轮消息。"
-print("归档文件：", list(archives))
-print("PASS: 自动摘要触发，早期消息归档，后续调用继续执行")
+```bash
+.venv/bin/python lessons/ch03/code/advanced/12_summarization.py
 ```
+
+脚本使用很小的消息数触发阈值，连续发送八轮消息。观察输出中的 `/conversation_history/` 归档路径，并验证第一轮原文仍在归档里。这是进阶选学，不是理解 Backend 的前置条件。
+
 
 这个实验不应通过 `len(result["messages"])` 单独推断“真实模型输入缩短了多少”。图中的保存状态、摘要事件和最终送给模型的请求视图可能不同；要测模型输入，需在模型调用处记录实际请求内容或 token usage。
 
